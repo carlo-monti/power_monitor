@@ -1,275 +1,106 @@
-#include <WiFi.h>
-#include "time.h"
-#include <NTPClient.h>
-#include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <MD_Parola.h>
-#include <MD_MAX72xx.h>
+#include <Wire.h>
+#include <Adafruit_INA219.h>
 #include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
-#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
+#define AVG_LENGTH 10
+#define REFRESH_FREQ_MS 200
 
-#define MAX_DEVICES 4
-#define CLK_PIN 18
-#define DATA_PIN 23
-#define CS_PIN 17
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+#define OLED_MOSI   11
+#define OLED_CLK   13
+#define OLED_DC    8
+#define OLED_CS    10
+#define OLED_RESET 6
 
-#define TRANSITION_TIME 5000
+Adafruit_INA219 ina219;
 
-const char ssid[] = "TIM-28371915";        // your network SSID (name)
-const char password[] = "Mar1annaCarl0An1taS3bast1an01r3n3";    // your network password (use for WPA, or use as key for WEP)
-const char* serverName = "https://third.zcsazzurroportal.com:19003/";
-String thingKey = "ZH3ES160NCA187";
-DynamicJsonDocument jsonBuffer(2048);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP);
+int i = 0;
+float shuntvoltage[AVG_LENGTH] = {0};
+float busvoltage[AVG_LENGTH] = {0};
+float current_mA[AVG_LENGTH] = {0};
+float loadvoltage[AVG_LENGTH] = {0};
+float power_mW[AVG_LENGTH] = {0};
 
-int fuso = 2;
-unsigned long t1;
-
-unsigned long lastTime = 0;
-unsigned long timerDelay = 5000;
-
-MD_Parola display = MD_Parola(HARDWARE_TYPE,CS_PIN, MAX_DEVICES);
-
-
-void setup() { 
+void setup(void) 
+{
   Serial.begin(115200);
-  display.begin();
-  display.setIntensity(0);
-
-	// Clear the display
-	display.displayClear();
- 
-  int i = 0;
   while (!Serial) {
-    delay(100);
-    i++;
-    if (i >= 10) break;
+      // will pause Zero, Leonardo, etc until serial console opens
+      delay(1);
   }
-  
-  
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.print(".");
+  if(!display.begin(SSD1306_SWITCHCAPVCC)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
   }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-  
-  timeClient.begin();
+  Serial.println("Hello!");
+  // Initialize the INA219.
+  // By default the initialization will use the largest range (32V, 2A).  However
+  // you can call a setCalibration function to change this range (see comments).
+  if (! ina219.begin()) {
+    Serial.println("Failed to find INA219 chip");
+    while (1) { delay(10); }
+  }
+  // To use a slightly lower 32V, 1A range (higher precision on amps):
+  //ina219.setCalibration_32V_1A();
+  // Or to use a lower 16V, 400mA range (higher precision on volts and amps):
+  //ina219.setCalibration_16V_400mA();
+  Serial.println("Measuring voltage and current with INA219 ...");
 }
- 
-void loop() {
+
+void loop(void) 
+{
+  shuntvoltage[i] = ina219.getShuntVoltage_mV();
+  busvoltage[i] = ina219.getBusVoltage_V();
+  current_mA[i] = ina219.getCurrent_mA();
+  power_mW[i] = ina219.getPower_mW();
+  loadvoltage[i] = busvoltage[i] + (shuntvoltage[i] / 1000);
   
-  static bool fpoint;
+  float shuntvoltage_avg = 0;
+  float busvoltage_avg = 0;
+  float current_mA_avg = 0;
+  float loadvoltage_avg = 0;
+  float power_mW_avg = 0;
 
-  /* TIME */
-  if(WiFi.status()== WL_CONNECTED){
-    timeClient.update();
-    int hh = timeClient.getHours();
-    hh += fuso;
-    if (hh >= 24) hh - 24;
-    int mm = timeClient.getMinutes();
-    String time_string = "";
-    time_string = time_string + String(hh);
-    time_string = time_string + ":";
-    time_string = time_string + String(mm);
-    display.setTextAlignment(PA_CENTER);
-    display.displayClear();
-    display.print(time_string);
-  }else {
-    Serial.println("WiFi Disconnected");
+  for(int j=0; j<AVG_LENGTH; j++){
+    shuntvoltage_avg += shuntvoltage[i];
+    busvoltage_avg = busvoltage[i];
+    current_mA_avg = current_mA[i];
+    loadvoltage_avg = loadvoltage[i];
+    power_mW_avg = power_mW[i];
   }
 
-  delay(TRANSITION_TIME);
+  shuntvoltage_avg += shuntvoltage_avg / AVG_LENGTH;
+  busvoltage_avg = busvoltage_avg / AVG_LENGTH;
+  current_mA_avg = current_mA_avg / AVG_LENGTH;
+  loadvoltage_avg = current_mA_avg / AVG_LENGTH;
+  power_mW_avg = power_mW_avg / AVG_LENGTH;
 
-  /* POWER */
-  if(WiFi.status()== WL_CONNECTED){
-    HTTPClient http;
-    // Your Domain name with URL path or IP address with path
-    http.begin(serverName);
-    // Specify content-type header
-    // If you need an HTTP request with a content type: application/json, use the following:
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Authorization", "Zcs eHWAeEq0aYO0");
-    http.addHeader("client", "CarloMonti");
-    // JSON data to send with HTTP POST
-    String httpRequestData = "{\"realtimeData\": {\"command\": \"realtimeData\",\"params\": {\"thingKey\": \"ZH3ES160NCA187\",\"requiredValues\": \"*\"}}}";           
-    // Send HTTP POST reques
+  Serial.print("Bus Voltage:   "); Serial.print(busvoltage_avg); Serial.println(" V");
+  Serial.print("Shunt Voltage: "); Serial.print(shuntvoltage_avg); Serial.println(" mV");
+  Serial.print("Load Voltage:  "); Serial.print(loadvoltage_avg); Serial.println(" V");
+  Serial.print("Current:       "); Serial.print(current_mA_avg); Serial.println(" mA");
+  Serial.print("Power:         "); Serial.print(power_mW_avg); Serial.println(" mW");
+  Serial.println("");
 
-    int httpResponseCode = http.POST(httpRequestData);
-    Serial.print("HTTP Response code: ");
-    Serial.println(httpResponseCode);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.print("Bus: ");display.print(busvoltage_avg);display.println(" V");
+  display.print("Shunt: ");display.print(shuntvoltage_avg);display.println(" mV");
+  display.print("Current: ");display.print(current_mA_avg);display.println(" mA");
+  display.print("Power: ");display.print(power_mW_avg);display.println(" mW");
+  display.display();
 
-    if(httpResponseCode == 200)
-    {
-      //Expected output:{"realtimeData": {"params": {"value": [{"ZH3ES160NCA187": {"energyGenerating": 21.33, "thingFind": "2023-05-19T15:29:41Z", "lastUpdate": "2023-08-17T12:48:01Z", "energyGeneratingTotal": 2851.3, "powerGenerating": 4120}}]}, "success": true}}
-        String json = http.getString();
-        Serial.println(json);
-        Serial.println("NOW parsing");
-        DeserializationError err = deserializeJson(jsonBuffer, json);
-        if(err){
-          Serial.println("ERROR: ");
-          Serial.println(err.c_str());
-          return;
-        }else{
-          Serial.println("Deserialization OK: ");
-        }
-        float powerGenerating = jsonBuffer["realtimeData"]["params"]["value"][0]["ZH3ES160NCA187"]["powerGenerating"];
-        String power_string = "";
-        if(powerGenerating < 1){
-          power_string = String(powerGenerating);
-        }else{
-          power_string = String(int(powerGenerating));
-        }
-        power_string = power_string + "kW";
-        Serial.println("powerGenerating: ");
-        Serial.println(powerGenerating);
-        display.setTextAlignment(PA_CENTER);
-        display.displayClear();
-        display.print(power_string);
-    }
-    else
-    {
-      Serial.println("Error in response");
-    }
-    // Free resources
-    http.end();
-  }else {
-    Serial.println("WiFi Disconnected");
+  i++;
+  if(i == AVG_LENGTH){
+    i = 0;
   }
-
-  delay(TRANSITION_TIME);
   
-  /* METEO */
-  if(WiFi.status()== WL_CONNECTED){
-    HTTPClient http;
-    // Your Domain name with URL path or IP address with path
-    http.begin("https://avwx.rest/api/metar/LIMC");
-    // Specify content-type header
-    // If you need an HTTP request with a content type: application/json, use the following:
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Authorization", "BEARER hSJvRXMUoCPDcY0khi9-u1B_rdfJzm8cUepgM0RVUCI");
-    int httpResponseCode = http.GET();
-    Serial.print("HTTP Response code: ");
-    Serial.println(httpResponseCode);
-
-    if(httpResponseCode == 200)
-    {
-      //Expected output:{"realtimeData": {"params": {"value": [{"ZH3ES160NCA187": {"energyGenerating": 21.33, "thingFind": "2023-05-19T15:29:41Z", "lastUpdate": "2023-08-17T12:48:01Z", "energyGeneratingTotal": 2851.3, "powerGenerating": 4120}}]}, "success": true}}
-        String json = http.getString();
-        Serial.println(json);
-        Serial.println("NOW parsing");
-        DeserializationError err = deserializeJson(jsonBuffer, json);
-        if(err){
-          Serial.println("ERROR: ");
-          Serial.println(err.c_str());
-          return;
-        }else{
-          Serial.println("Deserialization OK: ");
-        }
-
-        /*{
-            "meta": {
-                "timestamp": "2023-08-17T19:20:53.943348Z",
-                "stations_updated": "2023-08-05",
-                "cache-timestamp": "2023-08-17T19:20:07.161000Z"
-            },
-            "altimeter": {
-                "repr": "Q1016",
-                "value": 1016,
-                "spoken": "one zero one six"
-            },
-            "clouds": [],
-            "flight_rules": "VFR",
-            "other": [],
-            "visibility": {
-                "repr": "CAVOK",
-                "value": 9999,
-                "spoken": "ceiling and visibility ok"
-            },
-            "wind_direction": {
-                "repr": "010",
-                "value": 10,
-                "spoken": "zero one zero"
-            },
-            "wind_gust": null,
-            "wind_speed": {
-                "repr": "04",
-                "value": 4,
-                "spoken": "four"
-            },
-            "wx_codes": [],
-            "raw": "LIMC 171850Z 01004KT CAVOK 25/14 Q1016 NOSIG",
-            "sanitized": "LIMC 171850Z 01004KT CAVOK 25/14 Q1016 NOSIG",
-            "station": "LIMC",
-            "time": {
-                "repr": "171850Z",
-                "dt": "2023-08-17T18:50:00Z"
-            },
-            "remarks": "NOSIG",
-            "dewpoint": {
-                "repr": "14",
-                "value": 14,
-                "spoken": "one four"
-            },
-            "relative_humidity": 0.5043159272445457,
-            "remarks_info": {
-                "maximum_temperature_6": null,
-                "minimum_temperature_6": null,
-                "pressure_tendency": null,
-                "precip_36_hours": null,
-                "precip_24_hours": null,
-                "sunshine_minutes": null,
-                "codes": [],
-                "dewpoint_decimal": null,
-                "maximum_temperature_24": null,
-                "minimum_temperature_24": null,
-                "precip_hourly": null,
-                "sea_level_pressure": null,
-                "snow_depth": null,
-                "temperature_decimal": null
-            },
-            "runway_visibility": [],
-            "temperature": {
-                "repr": "25",
-                "value": 25,
-                "spoken": "two five"
-            },
-            "wind_variable_direction": [],
-            "density_altitude": 2070,
-            "pressure_altitude": 686,
-            "units": {
-                "accumulation": "in",
-                "altimeter": "hPa",
-                "altitude": "ft",
-                "temperature": "C",
-                "visibility": "m",
-                "wind_speed": "kt"
-            }
-        }*/
-        int temperature = jsonBuffer["temperature"]["value"];
-        String meteo_string = "" + String(temperature) + "°C";
-        Serial.println("temperature: ");
-        Serial.println(temperature);
-        display.setTextAlignment(PA_CENTER);
-        display.displayClear();
-        display.print(meteo_string);
-    }
-    else
-    {
-      Serial.println("Error in response");
-    }
-    // Free resources
-    http.end();
-  }else {
-    Serial.println("WiFi Disconnected");
-  }
-
-  delay(TRANSITION_TIME);
+  delay(REFRESH_FREQ_MS);
 }
